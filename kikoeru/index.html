@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>iPad音波通信テスト（可聴域版）</title>
+    <title>iPad音波通信（高音域・非可聴音版）</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -46,29 +46,29 @@
             background: #e8e8ed;
             padding: 10px;
             border-radius: 8px;
-            height: 150px;
+            height: 180px;
             overflow-y: auto;
             font-family: monospace;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }
     </style>
 </head>
 <body>
 
-    <h1>iPad音波通信テスト（聞こえる音）</h1>
+    <h1>iPad音波通信（高音域版）</h1>
 
     <!-- 送信セクション -->
     <div class="card">
         <h2>送信 (Speaker)</h2>
         <input type="text" id="messageInput" value="A" placeholder="1文字だけ入力（例: A, B, C）">
-        <button onclick="sendMessage()">音を鳴らして送信する</button>
+        <button onclick="sendMessage()">高音波で送信する</button>
     </div>
 
     <!-- 受信セクション -->
     <div class="card">
         <h2>受信 (Listener)</h2>
         <button id="listenBtn" onclick="toggleListening()">受信マイクをONにする</button>
-        <p style="margin-top: 10px; font-size: 0.9rem;">受信ログ:</p>
+        <p style="margin-top: 10px; font-size: 0.9rem;">受信ログ & デバッグ:</p>
         <div id="logBox" class="log-box">マイクは停止中です...</div>
     </div>
 
@@ -79,20 +79,17 @@
         let analyser = null;
         let animationId = null;
 
-        // 文字（アルファベット大文字）と周波数（Hz）の対応表（人間が聞こえる200Hz〜800Hz付近）
-        // 例: 'A' = 440Hz (ラ), 'B' = 494Hz (シ), 'C' = 523Hz (ド) など
+        // 高音域用：A=16000Hzをベースに、1文字ごとに+50Hzずつずらす
         function getFrequencyForChar(char) {
             const code = char.toUpperCase().charCodeAt(0);
-            // A(65)を400Hzとして、文字ごとに20Hzずつ周波数を変える（例: A=400Hz, B=420Hz, C=440Hz...）
             if (code >= 65 && code <= 90) {
-                return 400 + (code - 65) * 20;
+                return 16000 + (code - 65) * 50;
             }
-            return 440; // デフォルト（ラ）
+            return 16000;
         }
 
         function getCharForFrequency(freq) {
-            // 周波数から一番近い文字を逆算
-            const index = Math.round((freq - 400) / 20);
+            const index = Math.round((freq - 16000) / 50);
             const code = 65 + index;
             if (code >= 65 && code <= 90) {
                 return String.fromCharCode(code);
@@ -115,15 +112,13 @@
             const targetChar = text.charAt(0);
             const frequency = getFrequencyForChar(targetChar);
 
-            console.log(`送信: ${targetChar} -> ${frequency}Hz`);
-
             const oscillator = audioCtx.createOscillator();
             const gainNode = audioCtx.createGain();
 
-            oscillator.type = 'sine'; // ピピッという綺麗な正弦波
+            oscillator.type = 'sine';
             oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
 
-            // 音量と長さ（1秒間しっかり鳴らす）
+            // 高音域はスピーカーに負荷がかかりやすいため、音量を少し優しめ(0.2)にして1秒間鳴らす
             gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
             gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
             gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1.0);
@@ -134,7 +129,7 @@
             oscillator.start();
             oscillator.stop(audioCtx.currentTime + 1.0);
 
-            addLog(`送信: 「${targetChar}」 (${frequency}Hzの音を出力しました)`);
+            addLog(`[送信] 「${targetChar}」 (${frequency}Hzの高音) を出力しました`);
         }
 
         // --- 受信機能 ---
@@ -150,17 +145,24 @@
                         audioCtx.resume();
                     }
 
-                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: false
+                        } 
+                    });
+                    
                     const source = audioCtx.createMediaStreamSource(audioStream);
                     
                     analyser = audioCtx.createAnalyser();
-                    analyser.fftSize = 2048; 
+                    analyser.fftSize = 8192; // 高音域をより細かく分析するためFFTサイズを倍に拡大
                     source.connect(analyser);
 
                     isListening = true;
                     btn.textContent = "受信マイクをOFFにする";
                     btn.classList.add("active");
-                    addLog("マイク起動。音を待っています...");
+                    addLog("マイク起動（高音域スキャン中）...");
 
                     detectAudio();
                 } catch (err) {
@@ -180,7 +182,8 @@
             }
         }
 
-        // --- 周波数のリアルタイム監視 ---
+        let lastDetectTime = 0;
+
         function detectAudio() {
             if (!isListening) return;
 
@@ -190,13 +193,13 @@
 
             const nyquist = audioCtx.sampleRate / 2;
             
-            // 300Hz〜1000Hzの範囲で最も強い音を探す
             let maxEnergy = -Infinity;
             let peakFreq = -1;
 
+            // 高音域（15,800Hz 〜 17,500Hz）を探索
             for (let i = 0; i < bufferLength; i++) {
                 const freq = (i * nyquist) / bufferLength;
-                if (freq >= 300 && freq <= 1000) {
+                if (freq >= 15800 && freq <= 17500) {
                     if (dataArray[i] > maxEnergy) {
                         maxEnergy = dataArray[i];
                         peakFreq = freq;
@@ -204,10 +207,14 @@
                 }
             }
 
-            // 一定以上の音量（例: -35dBより大きい音）を検知した場合
-            if (maxEnergy > -35) {
-                const detectedChar = getCharForFrequency(peakFreq);
-                addLog(`🎯 検知！ 周波数: ${Math.round(peakFreq)}Hz -> 復元文字: [ ${detectedChar} ]`);
+            const now = Date.now();
+            // 高音域は空気中で減衰しやすいため、しきい値を -70dB と少し広めに設定
+            if (maxEnergy > -70) {
+                if (now - lastDetectTime > 1000) {
+                    const detectedChar = getCharForFrequency(peakFreq);
+                    addLog(`🔍 高音検出! ${Math.round(peakFreq)}Hz (${Math.round(maxEnergy)}dB) -> [ ${detectedChar} ]`);
+                    lastDetectTime = now;
+                }
             }
 
             animationId = requestAnimationFrame(detectAudio);
