@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>iPad音波通信（連続文字・シーケンシャル版）</title>
+    <title>iPad音波通信（高精度・連続送信版）</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -58,7 +58,7 @@
             background: #e8e8ed;
             padding: 10px;
             border-radius: 8px;
-            height: 120px;
+            height: 140px;
             overflow-y: auto;
             font-family: monospace;
             font-size: 0.8rem;
@@ -67,13 +67,13 @@
 </head>
 <body>
 
-    <h1>iPad音波通信（連続文字送信）</h1>
+    <h1>iPad音波通信（高精度版）</h1>
 
     <!-- 送信セクション -->
     <div class="card">
         <h2>送信 (Speaker)</h2>
-        <input type="text" id="messageInput" value="HELLO" placeholder="送る文字（英字）">
-        <button onclick="sendSequenceMessage()">連続音波で送信する</button>
+        <input type="text" id="messageInput" value="ABC" placeholder="送る文字（英字）">
+        <button onclick="sendSequenceMessage()">丁寧な連続音で送信する</button>
     </div>
 
     <!-- 受信セクション -->
@@ -97,17 +97,17 @@
 
         let receivedString = "";
 
-        // 文字と周波数の変換（A=16000Hz, B=16050Hz...）
+        // 精度を上げるため、周波数間隔を「100Hz刻み」に拡大 (A=16000Hz, B=16100Hz...)
         function getFrequencyForChar(char) {
             const code = char.toUpperCase().charCodeAt(0);
             if (code >= 65 && code <= 90) {
-                return 16000 + (code - 65) * 50;
+                return 16000 + (code - 65) * 100;
             }
-            return 16000; // 対象外はA扱い、またはスペース等
+            return 16000;
         }
 
         function getCharForFrequency(freq) {
-            const index = Math.round((freq - 16000) / 50);
+            const index = Math.round((freq - 16000) / 100);
             const code = 65 + index;
             if (code >= 65 && code <= 90) {
                 return String.fromCharCode(code);
@@ -115,7 +115,7 @@
             return "";
         }
 
-        // --- 連続送信機能（順番に音を鳴らす） ---
+        // --- 丁寧な連続送信機能 ---
         async function sendSequenceMessage() {
             if (!audioCtx) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -129,8 +129,9 @@
 
             addLog(`[送信開始] "${text}"`);
 
-            const charDuration = 0.4; // 1文字あたりの音の長さ（秒）
-            const intervalDuration = 0.2; // 文字間の無音（秒）
+            // 1文字の長さを0.7秒、間隔を0.4秒にして確実性を上げる
+            const charDuration = 0.7; 
+            const intervalDuration = 0.4; 
 
             for (let i = 0; i < text.length; i++) {
                 const char = text.charAt(i);
@@ -138,7 +139,6 @@
 
                 playTone(freq, charDuration);
                 
-                // 次の文字までウェイト
                 await new Promise(resolve => setTimeout(resolve, (charDuration + intervalDuration) * 1000));
             }
 
@@ -152,8 +152,10 @@
             oscillator.type = 'sine';
             oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
 
+            // 音の出始めと終わりに小さなフェードを入れ、雑音やプチ音を防ぐ
             gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-            gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.05);
+            gainNode.gain.linearRampToValueAtTime(0.25, audioCtx.currentTime + 0.1);
+            gainNode.gain.setValueAtTime(0.25, audioCtx.currentTime + duration - 0.1);
             gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
 
             oscillator.connect(gainNode);
@@ -186,13 +188,13 @@
                     
                     const source = audioCtx.createMediaStreamSource(audioStream);
                     analyser = audioCtx.createAnalyser();
-                    analyser.fftSize = 8192;
+                    analyser.fftSize = 16384; // さらに精度を上げるためFFTサイズを最大クラスに
                     source.connect(analyser);
 
                     isListening = true;
                     btn.textContent = "受信マイクをOFFにする";
                     btn.classList.add("active");
-                    addLog("マイク起動（連続受信待機中）...");
+                    addLog("マイク起動（高精度モード）...");
 
                     detectAudioLoop();
                 } catch (err) {
@@ -212,8 +214,8 @@
             }
         }
 
-        let lastChar = "";
-        let lastDetectTime = 0;
+        let lastDetectedChar = "";
+        let lockUntilTime = 0;
 
         function detectAudioLoop() {
             if (!isListening) return;
@@ -226,9 +228,10 @@
             let maxEnergy = -Infinity;
             let peakFreq = -1;
 
+            // 15800Hz 〜 18600Hz の範囲をスキャン
             for (let i = 0; i < bufferLength; i++) {
                 const freq = (i * nyquist) / bufferLength;
-                if (freq >= 15800 && freq <= 17500) {
+                if (freq >= 15800 && freq <= 18600) {
                     if (dataArray[i] > maxEnergy) {
                         maxEnergy = dataArray[i];
                         peakFreq = freq;
@@ -237,22 +240,18 @@
             }
 
             const now = Date.now();
-            // 一定以上の音量を検知した場合
-            if (maxEnergy > -70) {
+
+            // しきい値(-68dB)を超え、かつロック時間（同じ文字の重複防止期間）が過ぎている場合
+            if (maxEnergy > -68 && now > lockUntilTime) {
                 const detectedChar = getCharForFrequency(peakFreq);
-                // 同じ文字が短時間に連続して重なるのを防ぎつつ、違う文字や一定間隔以上なら追加
-                if (detectedChar && (detectedChar !== lastChar || now - lastDetectTime > 500)) {
+                
+                if (detectedChar) {
                     receivedString += detectedChar;
                     document.getElementById('receivedBox').textContent = receivedString;
-                    addLog(`受取: ${detectedChar} (${Math.round(peakFreq)}Hz)`);
+                    addLog(`🎯 成功: "${detectedChar}" (${Math.round(peakFreq)}Hz / ${Math.round(maxEnergy)}dB)`);
                     
-                    lastChar = detectedChar;
-                    lastDetectTime = now;
-                }
-            } else {
-                // 音が途切れたら直前の文字判定をリセット（次の同じ文字を受け取れるようにする）
-                if (now - lastDetectTime > 600) {
-                    lastChar = "";
+                    // 1文字判定したら、次の文字を受け付けるまで1.0秒間は同じ文字や誤検知をロックする
+                    lockUntilTime = now + 1000;
                 }
             }
 
