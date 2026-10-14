@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iPad音波通信テスト（可聴域版）</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 600px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+        }
+        h1 { font-size: 1.5rem; text-align: center; }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #d2d2d7;
+            border-radius: 8px;
+            font-size: 1rem;
+            box-sizing: border-box;
+            margin-bottom: 10px;
+        }
+        button {
+            background-color: #0071e3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover { background-color: #0077ed; }
+        button.active { background-color: #34c759; }
+        .log-box {
+            background: #e8e8ed;
+            padding: 10px;
+            border-radius: 8px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>iPad音波通信テスト（聞こえる音）</h1>
+
+    <!-- 送信セクション -->
+    <div class="card">
+        <h2>送信 (Speaker)</h2>
+        <input type="text" id="messageInput" value="A" placeholder="1文字だけ入力（例: A, B, C）">
+        <button onclick="sendMessage()">音を鳴らして送信する</button>
+    </div>
+
+    <!-- 受信セクション -->
+    <div class="card">
+        <h2>受信 (Listener)</h2>
+        <button id="listenBtn" onclick="toggleListening()">受信マイクをONにする</button>
+        <p style="margin-top: 10px; font-size: 0.9rem;">受信ログ:</p>
+        <div id="logBox" class="log-box">マイクは停止中です...</div>
+    </div>
+
+    <script>
+        let audioCtx = null;
+        let isListening = false;
+        let audioStream = null;
+        let analyser = null;
+        let animationId = null;
+
+        // 文字（アルファベット大文字）と周波数（Hz）の対応表（人間が聞こえる200Hz〜800Hz付近）
+        // 例: 'A' = 440Hz (ラ), 'B' = 494Hz (シ), 'C' = 523Hz (ド) など
+        function getFrequencyForChar(char) {
+            const code = char.toUpperCase().charCodeAt(0);
+            // A(65)を400Hzとして、文字ごとに20Hzずつ周波数を変える（例: A=400Hz, B=420Hz, C=440Hz...）
+            if (code >= 65 && code <= 90) {
+                return 400 + (code - 65) * 20;
+            }
+            return 440; // デフォルト（ラ）
+        }
+
+        function getCharForFrequency(freq) {
+            // 周波数から一番近い文字を逆算
+            const index = Math.round((freq - 400) / 20);
+            const code = 65 + index;
+            if (code >= 65 && code <= 90) {
+                return String.fromCharCode(code);
+            }
+            return "?";
+        }
+
+        // --- 送信機能 ---
+        function sendMessage() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
+            const text = document.getElementById('messageInput').value;
+            if (!text) return;
+
+            const targetChar = text.charAt(0);
+            const frequency = getFrequencyForChar(targetChar);
+
+            console.log(`送信: ${targetChar} -> ${frequency}Hz`);
+
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = 'sine'; // ピピッという綺麗な正弦波
+            oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+
+            // 音量と長さ（1秒間しっかり鳴らす）
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+            gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
+            gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1.0);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 1.0);
+
+            addLog(`送信: 「${targetChar}」 (${frequency}Hzの音を出力しました)`);
+        }
+
+        // --- 受信機能 ---
+        async function toggleListening() {
+            const btn = document.getElementById('listenBtn');
+            
+            if (!isListening) {
+                try {
+                    if (!audioCtx) {
+                        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    if (audioCtx.state === 'suspended') {
+                        audioCtx.resume();
+                    }
+
+                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const source = audioCtx.createMediaStreamSource(audioStream);
+                    
+                    analyser = audioCtx.createAnalyser();
+                    analyser.fftSize = 2048; 
+                    source.connect(analyser);
+
+                    isListening = true;
+                    btn.textContent = "受信マイクをOFFにする";
+                    btn.classList.add("active");
+                    addLog("マイク起動。音を待っています...");
+
+                    detectAudio();
+                } catch (err) {
+                    alert("マイクの許可が必要です: " + err);
+                }
+            } else {
+                if (audioStream) {
+                    audioStream.getTracks().forEach(track => track.stop());
+                }
+                if (animationId) {
+                    cancelAnimationFrame(animationId);
+                }
+                isListening = false;
+                btn.textContent = "受信マイクをONにする";
+                btn.classList.remove("active");
+                addLog("マイクを停止しました。");
+            }
+        }
+
+        // --- 周波数のリアルタイム監視 ---
+        function detectAudio() {
+            if (!isListening) return;
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Float32Array(bufferLength);
+            analyser.getFloatFrequencyData(dataArray);
+
+            const nyquist = audioCtx.sampleRate / 2;
+            
+            // 300Hz〜1000Hzの範囲で最も強い音を探す
+            let maxEnergy = -Infinity;
+            let peakFreq = -1;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const freq = (i * nyquist) / bufferLength;
+                if (freq >= 300 && freq <= 1000) {
+                    if (dataArray[i] > maxEnergy) {
+                        maxEnergy = dataArray[i];
+                        peakFreq = freq;
+                    }
+                }
+            }
+
+            // 一定以上の音量（例: -35dBより大きい音）を検知した場合
+            if (maxEnergy > -35) {
+                const detectedChar = getCharForFrequency(peakFreq);
+                addLog(`🎯 検知！ 周波数: ${Math.round(peakFreq)}Hz -> 復元文字: [ ${detectedChar} ]`);
+            }
+
+            animationId = requestAnimationFrame(detectAudio);
+        }
+
+        function addLog(text) {
+            const logBox = document.getElementById('logBox');
+            const time = new Date().toLocaleTimeString();
+            logBox.innerHTML += `[${time}] ${text}<br>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+    </script>
+</body>
+</html>
