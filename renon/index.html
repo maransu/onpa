@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>iPad音波通信デバッグ版</title>
+    <title>iPad音波通信（連続文字・シーケンシャル版）</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -39,36 +39,52 @@
             font-size: 1rem;
             cursor: pointer;
             width: 100%;
+            margin-bottom: 10px;
         }
         button:hover { background-color: #0077ed; }
         button.active { background-color: #34c759; }
+        button.secondary { background-color: #8e8e93; }
+        .result-box {
+            background: #f0f0f5;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            min-height: 40px;
+            margin-bottom: 10px;
+            word-break: break-all;
+        }
         .log-box {
             background: #e8e8ed;
             padding: 10px;
             border-radius: 8px;
-            height: 180px;
+            height: 120px;
             overflow-y: auto;
             font-family: monospace;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
         }
     </style>
 </head>
 <body>
 
-    <h1>iPad音波通信 デバッグ版</h1>
+    <h1>iPad音波通信（連続文字送信）</h1>
 
     <!-- 送信セクション -->
     <div class="card">
         <h2>送信 (Speaker)</h2>
-        <input type="text" id="messageInput" value="A" placeholder="1文字だけ入力（例: A, B, C）">
-        <button onclick="sendMessage()">音を鳴らして送信する</button>
+        <input type="text" id="messageInput" value="HELLO" placeholder="送る文字（英字）">
+        <button onclick="sendSequenceMessage()">連続音波で送信する</button>
     </div>
 
     <!-- 受信セクション -->
     <div class="card">
         <h2>受信 (Listener)</h2>
         <button id="listenBtn" onclick="toggleListening()">受信マイクをONにする</button>
-        <p style="margin-top: 10px; font-size: 0.9rem;">受信ログ & デバッグ:</p>
+        <p style="margin-top: 10px; font-size: 0.9rem;">受信したメッセージ:</p>
+        <div id="receivedBox" class="result-box">（ここに受信文字が表示されます）</div>
+        <button class="secondary" onclick="clearReceived()">受信をクリア</button>
+        
+        <p style="margin-top: 10px; font-size: 0.85rem;">デバッグログ:</p>
         <div id="logBox" class="log-box">マイクは停止中です...</div>
     </div>
 
@@ -79,24 +95,28 @@
         let analyser = null;
         let animationId = null;
 
+        let receivedString = "";
+
+        // 文字と周波数の変換（A=16000Hz, B=16050Hz...）
         function getFrequencyForChar(char) {
             const code = char.toUpperCase().charCodeAt(0);
             if (code >= 65 && code <= 90) {
-                return 400 + (code - 65) * 20;
+                return 16000 + (code - 65) * 50;
             }
-            return 440;
+            return 16000; // 対象外はA扱い、またはスペース等
         }
 
         function getCharForFrequency(freq) {
-            const index = Math.round((freq - 400) / 20);
+            const index = Math.round((freq - 16000) / 50);
             const code = 65 + index;
             if (code >= 65 && code <= 90) {
                 return String.fromCharCode(code);
             }
-            return "?";
+            return "";
         }
 
-        function sendMessage() {
+        // --- 連続送信機能（順番に音を鳴らす） ---
+        async function sendSequenceMessage() {
             if (!audioCtx) {
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
@@ -107,9 +127,25 @@
             const text = document.getElementById('messageInput').value;
             if (!text) return;
 
-            const targetChar = text.charAt(0);
-            const frequency = getFrequencyForChar(targetChar);
+            addLog(`[送信開始] "${text}"`);
 
+            const charDuration = 0.4; // 1文字あたりの音の長さ（秒）
+            const intervalDuration = 0.2; // 文字間の無音（秒）
+
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charAt(i);
+                const freq = getFrequencyForChar(char);
+
+                playTone(freq, charDuration);
+                
+                // 次の文字までウェイト
+                await new Promise(resolve => setTimeout(resolve, (charDuration + intervalDuration) * 1000));
+            }
+
+            addLog(`[送信完了]`);
+        }
+
+        function playTone(frequency, duration) {
             const oscillator = audioCtx.createOscillator();
             const gainNode = audioCtx.createGain();
 
@@ -117,18 +153,17 @@
             oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
 
             gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-            gainNode.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 0.1);
-            gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1.0);
+            gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.05);
+            gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
 
             oscillator.connect(gainNode);
             gainNode.connect(audioCtx.destination);
 
             oscillator.start();
-            oscillator.stop(audioCtx.currentTime + 1.0);
-
-            addLog(`[送信] 「${targetChar}」 (${frequency}Hz) を出力しました`);
+            oscillator.stop(audioCtx.currentTime + duration);
         }
 
+        // --- 受信機能 ---
         async function toggleListening() {
             const btn = document.getElementById('listenBtn');
             
@@ -141,7 +176,6 @@
                         audioCtx.resume();
                     }
 
-                    // マイクの音質オプション（エコーキャンセル等を切ってダイレクトに拾う設定）
                     audioStream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: false,
@@ -151,17 +185,16 @@
                     });
                     
                     const source = audioCtx.createMediaStreamSource(audioStream);
-                    
                     analyser = audioCtx.createAnalyser();
-                    analyser.fftSize = 4096; // より細かく周波数を分析
+                    analyser.fftSize = 8192;
                     source.connect(analyser);
 
                     isListening = true;
                     btn.textContent = "受信マイクをOFFにする";
                     btn.classList.add("active");
-                    addLog("マイク起動（ノイズ抑制オフ）。音を待っています...");
+                    addLog("マイク起動（連続受信待機中）...");
 
-                    detectAudio();
+                    detectAudioLoop();
                 } catch (err) {
                     alert("マイクの許可が必要です: " + err);
                 }
@@ -179,9 +212,10 @@
             }
         }
 
+        let lastChar = "";
         let lastDetectTime = 0;
 
-        function detectAudio() {
+        function detectAudioLoop() {
             if (!isListening) return;
 
             const bufferLength = analyser.frequencyBinCount;
@@ -189,14 +223,12 @@
             analyser.getFloatFrequencyData(dataArray);
 
             const nyquist = audioCtx.sampleRate / 2;
-            
             let maxEnergy = -Infinity;
             let peakFreq = -1;
 
-            // 300Hz〜1000Hzを探索
             for (let i = 0; i < bufferLength; i++) {
                 const freq = (i * nyquist) / bufferLength;
-                if (freq >= 300 && freq <= 1000) {
+                if (freq >= 15800 && freq <= 17500) {
                     if (dataArray[i] > maxEnergy) {
                         maxEnergy = dataArray[i];
                         peakFreq = freq;
@@ -204,18 +236,33 @@
                 }
             }
 
-            // 【デバッグ用】一番大きな音が聞こえた時、強制的にログに出す（しきい値を -65dB とかなり低めに設定）
             const now = Date.now();
-            if (maxEnergy > -65) {
-                // 1秒間に何度もログが出ないように間引く
-                if (now - lastDetectTime > 1000) {
-                    const detectedChar = getCharForFrequency(peakFreq);
-                    addLog(`🔍 検出! ${Math.round(peakFreq)}Hz (${Math.round(maxEnergy)}dB) -> [ ${detectedChar} ]`);
+            // 一定以上の音量を検知した場合
+            if (maxEnergy > -70) {
+                const detectedChar = getCharForFrequency(peakFreq);
+                // 同じ文字が短時間に連続して重なるのを防ぎつつ、違う文字や一定間隔以上なら追加
+                if (detectedChar && (detectedChar !== lastChar || now - lastDetectTime > 500)) {
+                    receivedString += detectedChar;
+                    document.getElementById('receivedBox').textContent = receivedString;
+                    addLog(`受取: ${detectedChar} (${Math.round(peakFreq)}Hz)`);
+                    
+                    lastChar = detectedChar;
                     lastDetectTime = now;
+                }
+            } else {
+                // 音が途切れたら直前の文字判定をリセット（次の同じ文字を受け取れるようにする）
+                if (now - lastDetectTime > 600) {
+                    lastChar = "";
                 }
             }
 
-            animationId = requestAnimationFrame(detectAudio);
+            animationId = requestAnimationFrame(detectAudioLoop);
+        }
+
+        function clearReceived() {
+            receivedString = "";
+            document.getElementById('receivedBox').textContent = "（ここに受信文字が表示されます）";
+            addLog("受信履歴をクリアしました。");
         }
 
         function addLog(text) {
@@ -227,4 +274,3 @@
     </script>
 </body>
 </html>
-
